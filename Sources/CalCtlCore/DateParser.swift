@@ -12,6 +12,14 @@ public enum CalCtlError: Error, CustomStringConvertible, Equatable {
     }
 }
 
+public struct AllDayDateRange: Equatable {
+    public let startDate: Date
+    public let endDate: Date
+    public let startDateOnly: String
+    public let endDateOnly: String
+    public let endDateSemantics: String
+}
+
 public struct DateParser {
     private static let isoWithFractional: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -56,6 +64,32 @@ public struct DateParser {
         return comps
     }
 
+    public static func allDayRange(_ raw: String, timeZone: TimeZone = .current) throws -> AllDayDateRange {
+        let comps = try parseAllDayDate(raw)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+
+        var startComponents = DateComponents()
+        startComponents.calendar = calendar
+        startComponents.timeZone = timeZone
+        startComponents.year = comps.year
+        startComponents.month = comps.month
+        startComponents.day = comps.day
+
+        guard let startDate = calendar.date(from: startComponents),
+              let endDate = calendar.date(byAdding: .day, value: 1, to: startDate) else {
+            throw CalCtlError.invalidDate("Could not build all-day date")
+        }
+
+        return AllDayDateRange(
+            startDate: startDate,
+            endDate: endDate,
+            startDateOnly: dateOnlyString(from: startDate, calendar: calendar),
+            endDateOnly: dateOnlyString(from: endDate, calendar: calendar),
+            endDateSemantics: "exclusive"
+        )
+    }
+
     private static func hasExplicitTimezone(_ value: String) -> Bool {
         if value.hasSuffix("Z") { return true }
         return value.range(of: #"[+-]\d{2}:?\d{2}$"#, options: .regularExpression) != nil
@@ -65,5 +99,19 @@ public struct DateParser {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.string(from: date)
+    }
+
+    public static func allDayExclusiveEndDateOnly(from eventKitEndDate: Date, calendar: Calendar = .current) -> String {
+        let components = calendar.dateComponents([.hour, .minute, .second], from: eventKitEndDate)
+        if components.hour == 23, components.minute == 59, (components.second ?? 0) >= 58,
+           let exclusiveEnd = calendar.date(byAdding: .second, value: 1, to: eventKitEndDate) {
+            return dateOnlyString(from: exclusiveEnd, calendar: calendar)
+        }
+        return dateOnlyString(from: eventKitEndDate, calendar: calendar)
+    }
+
+    private static func dateOnlyString(from date: Date, calendar: Calendar) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
     }
 }

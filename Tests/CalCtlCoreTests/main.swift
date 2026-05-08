@@ -35,6 +35,10 @@ func tempConfigStore() -> (URL, ConfigStore) {
     return (root, ConfigStore(fileURL: root.appendingPathComponent(".calctl/config.json")))
 }
 
+func decodeConfig(_ json: String) throws -> CalCtlConfig {
+    try JSONDecoder().decode(CalCtlConfig.self, from: Data(json.utf8))
+}
+
 func mode(_ url: URL) throws -> Int {
     let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
     return (attrs[.posixPermissions] as? NSNumber)?.intValue ?? -1
@@ -65,6 +69,29 @@ let tests: [(String, () throws -> Void)] = [
         let config = try store.load()
         try expectEqual(config.version, 1, "version")
         try expect(config.aliases.isEmpty, "aliases should be empty")
+        try expectEqual(config.defaultAlertMinutes, [1440, 120], "default alert minutes")
+    }),
+    ("config decodes legacy files with alert defaults", {
+        let config = try decodeConfig(#"{"version":1,"aliases":{"work":"calendar-id"}}"#)
+        try expectEqual(config.version, 1, "version")
+        try expectEqual(config.aliases, ["work": "calendar-id"], "aliases")
+        try expectEqual(config.defaultAlertMinutes, [1440, 120], "legacy default alert minutes")
+    }),
+    ("config validates and stores alert defaults", {
+        let (root, store) = tempConfigStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let config = try store.setDefaultAlertMinutes([60, 10, 60, 0])
+        try expectEqual(config.defaultAlertMinutes, [60, 10, 0], "deduplicated alert defaults")
+        try expectEqual(try store.load().defaultAlertMinutes, [60, 10, 0], "persisted alert defaults")
+        let reset = try store.resetDefaultAlertMinutes()
+        try expectEqual(reset.defaultAlertMinutes, [1440, 120], "reset alert defaults")
+        try expectThrows("negative alert default") { _ = try store.setDefaultAlertMinutes([-1]) }
+        try expectThrows("too large alert default") { _ = try store.setDefaultAlertMinutes([525601]) }
+    }),
+    ("alert defaults merge with explicit alarms without duplicates", {
+        try expectEqual(AlertDefaults.merge(defaults: [1440, 120], explicit: [120, 15], includeDefaults: true), [1440, 120, 15], "merged defaults and explicit")
+        try expectEqual(AlertDefaults.merge(defaults: [1440, 120], explicit: [120, 15], includeDefaults: false), [120, 15], "explicit only")
+        try expectThrows("invalid explicit alarm") { _ = try AlertDefaults.merge(defaults: [1440], explicit: [-1], includeDefaults: true) }
     }),
     ("config save creates secure directory and file", {
         let (root, store) = tempConfigStore()
@@ -136,6 +163,36 @@ let tests: [(String, () throws -> Void)] = [
         try expectEqual(comps.year, 2026, "year")
         try expectEqual(comps.month, 5, "month")
         try expectEqual(comps.day, 8, "day")
+    }),
+    ("all-day ranges use local calendar days across DST start", {
+        let tz = TimeZone(identifier: "America/New_York")!
+        let range = try DateParser.allDayRange("2026-03-08", timeZone: tz)
+        try expectEqual(range.startDateOnly, "2026-03-08", "start date-only")
+        try expectEqual(range.endDateOnly, "2026-03-09", "end date-only")
+        try expectEqual(range.endDateSemantics, "exclusive", "end semantics")
+        try expectEqual(Int(range.endDate.timeIntervalSince(range.startDate)), 23 * 60 * 60, "DST start duration")
+    }),
+    ("all-day ranges use local calendar days across DST end", {
+        let tz = TimeZone(identifier: "America/New_York")!
+        let range = try DateParser.allDayRange("2026-11-01", timeZone: tz)
+        try expectEqual(range.startDateOnly, "2026-11-01", "start date-only")
+        try expectEqual(range.endDateOnly, "2026-11-02", "end date-only")
+        try expectEqual(Int(range.endDate.timeIntervalSince(range.startDate)), 25 * 60 * 60, "DST end duration")
+    }),
+    ("all-day ranges support positive-offset timezones", {
+        let tz = TimeZone(identifier: "Asia/Kolkata")!
+        let range = try DateParser.allDayRange("2026-05-08", timeZone: tz)
+        try expectEqual(range.startDateOnly, "2026-05-08", "start date-only")
+        try expectEqual(range.endDateOnly, "2026-05-09", "end date-only")
+        try expectEqual(Int(range.endDate.timeIntervalSince(range.startDate)), 24 * 60 * 60, "positive timezone duration")
+    }),
+    ("all-day EventKit inclusive final instant converts to exclusive date-only", {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York")!
+        let inclusiveEnd = calendar.date(from: DateComponents(year: 2026, month: 5, day: 8, hour: 23, minute: 59, second: 59))!
+        try expectEqual(DateParser.allDayExclusiveEndDateOnly(from: inclusiveEnd, calendar: calendar), "2026-05-09", "inclusive final instant")
+        let exclusiveMidnightEnd = calendar.date(from: DateComponents(year: 2026, month: 5, day: 9, hour: 0, minute: 0, second: 0))!
+        try expectEqual(DateParser.allDayExclusiveEndDateOnly(from: exclusiveMidnightEnd, calendar: calendar), "2026-05-09", "exclusive midnight")
     }),
     ("event draft trims title", {
         let start = try DateParser.parseTimed(timedStart)
@@ -222,6 +279,23 @@ let tests: [(String, () throws -> Void)] = [
         try expectThrows("blank title") {
             _ = try EventPreflight.validateCreate(title: "  ", start: timedStart, end: timedEnd, allDayDate: nil, url: nil, alarmMinutes: [])
         }
+    }),
+    ("structured location validation cleans fields", {
+        let location = try StructuredLocationInput.validate(title: "  Office  ", latitude: 40.7128, longitude: -74.0060, radiusMeters: 100)
+        try expectEqual(location?.title, "Office", "structured title")
+        try expectEqual(location?.latitude, 40.7128, "latitude")
+        try expectEqual(location?.longitude, -74.0060, "longitude")
+        try expectEqual(location?.radiusMeters, 100, "radius")
+        try expectEqual(try StructuredLocationInput.validate(title: nil, latitude: nil, longitude: nil, radiusMeters: nil), nil, "empty structured location")
+    }),
+    ("structured location validation rejects incomplete or invalid coordinates", {
+        try expectThrows("latitude without longitude") { _ = try StructuredLocationInput.validate(title: "Office", latitude: 40, longitude: nil, radiusMeters: nil) }
+        try expectThrows("longitude without latitude") { _ = try StructuredLocationInput.validate(title: "Office", latitude: nil, longitude: -70, radiusMeters: nil) }
+        try expectThrows("latitude range") { _ = try StructuredLocationInput.validate(title: "Office", latitude: 91, longitude: 0, radiusMeters: nil) }
+        try expectThrows("longitude range") { _ = try StructuredLocationInput.validate(title: "Office", latitude: 0, longitude: 181, radiusMeters: nil) }
+        try expectThrows("negative radius") { _ = try StructuredLocationInput.validate(title: "Office", latitude: 0, longitude: 0, radiusMeters: -1) }
+        try expectThrows("radius without coordinates") { _ = try StructuredLocationInput.validate(title: "Office", latitude: nil, longitude: nil, radiusMeters: 10) }
+        try expectThrows("blank title only") { _ = try StructuredLocationInput.validate(title: "  ", latitude: nil, longitude: nil, radiusMeters: nil) }
     }),
     ("update preflight rejects empty changes", {
         try expectThrows("no update fields") {

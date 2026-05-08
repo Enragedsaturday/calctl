@@ -23,6 +23,10 @@ Event notes can contain sensitive free-form text. To reduce accidental disclosur
 
 Agents and scripts should treat titles, locations, URLs, calendar names, and source names as potentially sensitive too.
 
+## Structured Location Policy
+
+Structured locations can contain precise coordinates. Event JSON includes `hasStructuredLocation` by default, but keeps `structuredLocation` null unless `events list/show --include-structured-location` is explicit. Create, update, and delete responses do not echo structured coordinates by default.
+
 ## Guarded Writes
 
 `events create`, `events update`, and `events delete` require `--force`. This flag is intentionally not a complete approval system; it is a last CLI-level guard. Agent integrations should show normalized action details to the user and obtain explicit approval before passing `--force`.

@@ -18,6 +18,9 @@ public struct CreateEventPreflight: Equatable {
     public let startDate: Date
     public let endDate: Date
     public let isAllDay: Bool
+    public let startDateOnly: String?
+    public let endDateOnly: String?
+    public let endDateSemantics: String?
     public let url: URL?
     public let alarmMinutes: [Int]
 }
@@ -55,8 +58,80 @@ public struct EventOutputPolicy {
     public static let mutationIncludeNotesByDefault = false
 }
 
+public struct AlertDefaults {
+    public static let standardMinutes = [1440, 120]
+    public static let maxMinutes = 60 * 24 * 365
+
+    public static func validate(_ minutes: [Int]) throws -> [Int] {
+        for value in minutes {
+            guard value >= 0 && value <= maxMinutes else {
+                throw CalCtlError.validation("Alarm minutes must be between 0 and 525600")
+            }
+        }
+        return unique(minutes)
+    }
+
+    public static func unique(_ minutes: [Int]) -> [Int] {
+        var seen = Set<Int>()
+        var result: [Int] = []
+        for value in minutes where seen.insert(value).inserted {
+            result.append(value)
+        }
+        return result
+    }
+
+    public static func merge(defaults: [Int], explicit: [Int], includeDefaults: Bool) throws -> [Int] {
+        let validDefaults = try validate(defaults)
+        let validExplicit = try validate(explicit)
+        return unique((includeDefaults ? validDefaults : []) + validExplicit)
+    }
+}
+
+public struct StructuredLocationInput: Equatable {
+    public let title: String?
+    public let latitude: Double?
+    public let longitude: Double?
+    public let radiusMeters: Double?
+
+    public static func validate(title: String?, latitude: Double?, longitude: Double?, radiusMeters: Double?) throws -> StructuredLocationInput? {
+        let cleanTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasTitle = cleanTitle?.isEmpty == false
+        let hasLatitude = latitude != nil
+        let hasLongitude = longitude != nil
+        let hasRadius = radiusMeters != nil
+
+        if title != nil && !hasTitle {
+            throw CalCtlError.validation("--structured-location-title cannot be blank")
+        }
+        guard hasTitle || hasLatitude || hasLongitude || hasRadius else { return nil }
+        guard hasLatitude == hasLongitude else {
+            throw CalCtlError.validation("--latitude and --longitude must be supplied together")
+        }
+        if let latitude {
+            guard latitude.isFinite && latitude >= -90 && latitude <= 90 else {
+                throw CalCtlError.validation("--latitude must be between -90 and 90")
+            }
+        }
+        if let longitude {
+            guard longitude.isFinite && longitude >= -180 && longitude <= 180 else {
+                throw CalCtlError.validation("--longitude must be between -180 and 180")
+            }
+        }
+        if let radiusMeters {
+            guard radiusMeters.isFinite && radiusMeters >= 0 else {
+                throw CalCtlError.validation("--radius-meters must be a non-negative number")
+            }
+            guard hasLatitude else {
+                throw CalCtlError.validation("--radius-meters requires --latitude and --longitude")
+            }
+        }
+
+        return StructuredLocationInput(title: cleanTitle, latitude: latitude, longitude: longitude, radiusMeters: radiusMeters)
+    }
+}
+
 public struct EventPreflight {
-    public static let maxAlarmMinutes = 60 * 24 * 365
+    public static let maxAlarmMinutes = AlertDefaults.maxMinutes
 
     public static func validateCreate(
         title: String,
@@ -70,23 +145,21 @@ public struct EventPreflight {
         guard !cleanedTitle.isEmpty else { throw CalCtlError.validation("Event title cannot be blank") }
 
         let parsedURL = try url.map { try Safety.parseURL($0) }
-        try validateAlarmMinutes(alarmMinutes)
+        _ = try AlertDefaults.validate(alarmMinutes)
 
         if let allDayDate {
             guard start == nil && end == nil else {
                 throw CalCtlError.validation("Use either --date or --start/--end, not both")
             }
-            let comps = try DateParser.parseAllDayDate(allDayDate)
-            let calendar = comps.calendar ?? Calendar.current
-            guard let startDate = calendar.date(from: comps),
-                  let endDate = calendar.date(byAdding: .day, value: 1, to: startDate) else {
-                throw CalCtlError.invalidDate("Could not build all-day date")
-            }
+            let range = try DateParser.allDayRange(allDayDate)
             return CreateEventPreflight(
                 title: cleanedTitle,
-                startDate: startDate,
-                endDate: endDate,
+                startDate: range.startDate,
+                endDate: range.endDate,
                 isAllDay: true,
+                startDateOnly: range.startDateOnly,
+                endDateOnly: range.endDateOnly,
+                endDateSemantics: range.endDateSemantics,
                 url: parsedURL,
                 alarmMinutes: alarmMinutes
             )
@@ -103,6 +176,9 @@ public struct EventPreflight {
             startDate: draft.start,
             endDate: draft.end,
             isAllDay: false,
+            startDateOnly: nil,
+            endDateOnly: nil,
+            endDateSemantics: nil,
             url: parsedURL,
             alarmMinutes: alarmMinutes
         )
@@ -159,14 +235,6 @@ public struct EventPreflight {
             throw CalCtlError.validation("Span must be 'this' or 'future'")
         }
         return span
-    }
-
-    private static func validateAlarmMinutes(_ alarmMinutes: [Int]) throws {
-        for minutes in alarmMinutes {
-            guard minutes >= 0 && minutes <= maxAlarmMinutes else {
-                throw CalCtlError.validation("Alarm minutes must be between 0 and 525600")
-            }
-        }
     }
 }
 

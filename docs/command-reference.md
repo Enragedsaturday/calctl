@@ -204,6 +204,79 @@ Runtime error:
 }
 ```
 
+## `calctl defaults show`
+
+Shows local defaults from `~/.calctl/config.json`. If no config exists, built-in defaults are returned.
+
+Flags: none.
+
+Side effects: none.
+
+TCC behavior: no Calendar access and no prompt.
+
+Success:
+
+```json
+{
+  "configPath": "/Users/local/.calctl/config.json",
+  "defaultAlertMinutes": [
+    1440,
+    120
+  ],
+  "status": "success"
+}
+```
+
+## `calctl defaults alerts`
+
+Sets default alert offsets in minutes before event start.
+
+Flags:
+
+- `--minutes N` required and repeatable, valid range `0...525600`.
+
+Side effects: creates or updates `~/.calctl/config.json`; the directory is set to `0700` and the file to `0600`.
+
+TCC behavior: no Calendar access and no prompt.
+
+Success:
+
+```json
+{
+  "configPath": "/Users/local/.calctl/config.json",
+  "defaultAlertMinutes": [
+    1440,
+    120
+  ],
+  "message": "Default alerts updated",
+  "status": "success"
+}
+```
+
+## `calctl defaults reset-alerts`
+
+Resets default alerts to 1 day and 2 hours before event start.
+
+Flags: none.
+
+Side effects: creates or updates `~/.calctl/config.json`; the directory is set to `0700` and the file to `0600`.
+
+TCC behavior: no Calendar access and no prompt.
+
+Success:
+
+```json
+{
+  "configPath": "/Users/local/.calctl/config.json",
+  "defaultAlertMinutes": [
+    1440,
+    120
+  ],
+  "message": "Default alerts reset",
+  "status": "success"
+}
+```
+
 ## `calctl events list`
 
 Lists events in a required date range, optionally scoped to one calendar.
@@ -215,6 +288,7 @@ Flags:
 - `--calendar CALENDAR_ID_OR_ALIAS` optional. Omit to search all event calendars.
 - `--limit N` optional, default `200`, valid range `1...5000`.
 - `--include-notes` optional. Includes note bodies; notes are omitted by default.
+- `--include-structured-location` optional. Includes structured location objects and precise coordinates; default output reports `hasStructuredLocation` and leaves `structuredLocation` null.
 
 Side effects: reads events.
 
@@ -227,6 +301,7 @@ Success:
   "count": 1,
   "events": [
     {
+      "alarms": [],
       "allDay": false,
       "calendar": {
         "allowsModifications": true,
@@ -237,10 +312,12 @@ Success:
       },
       "endDate": "2026-05-08T14:00:00Z",
       "hasAlarms": false,
+      "hasStructuredLocation": false,
       "hasRecurrenceRules": false,
       "id": "EVENT-ID",
       "location": "Office",
       "startDate": "2026-05-08T13:00:00Z",
+      "structuredLocation": null,
       "title": "Project review",
       "url": null
     }
@@ -269,6 +346,7 @@ Arguments:
 Flags:
 
 - `--include-notes` optional. Includes note bodies; notes are omitted by default.
+- `--include-structured-location` optional. Includes structured location objects and precise coordinates; default output reports `hasStructuredLocation` and leaves `structuredLocation` null.
 
 Side effects: reads one event.
 
@@ -279,6 +357,7 @@ Success:
 ```json
 {
   "event": {
+    "alarms": [],
     "allDay": false,
     "calendar": {
       "allowsModifications": true,
@@ -289,10 +368,12 @@ Success:
     },
     "endDate": "2026-05-08T14:00:00Z",
     "hasAlarms": false,
+    "hasStructuredLocation": false,
     "hasRecurrenceRules": false,
     "id": "EVENT-ID",
     "location": "Office",
     "startDate": "2026-05-08T13:00:00Z",
+    "structuredLocation": null,
     "title": "Project review",
     "url": null
   },
@@ -313,6 +394,8 @@ Runtime error:
 
 Creates a timed or all-day event.
 
+All-day event output keeps `startDate`/`endDate` for compatibility and also includes `startDateOnly`, `endDateOnly`, and `endDateSemantics: "exclusive"`. Use the date-only fields for display and all-day date math.
+
 Flags:
 
 - `--title TITLE` required.
@@ -321,9 +404,15 @@ Flags:
 - `--start TIMESTAMP` and `--end TIMESTAMP` required for timed events.
 - `--date YYYY-MM-DD` required for all-day events and mutually exclusive with `--start`/`--end`.
 - `--location TEXT` optional.
+- `--structured-location-title TEXT` optional. Creates an EventKit structured location title.
+- `--latitude VALUE` and `--longitude VALUE` optional and must be supplied together. Latitude must be `-90...90`; longitude must be `-180...180`. For negative longitudes, use equals form such as `--longitude=-73.9821524` so Swift ArgumentParser does not treat the value as another option.
+- `--radius-meters VALUE` optional, non-negative, and requires `--latitude`/`--longitude`.
 - `--notes TEXT` optional. Stored in Calendar, but omitted from the mutation response.
 - `--url URL` optional. Any syntactically valid URL with a scheme is accepted.
 - `--alarm-minutes N` optional and repeatable, valid range `0...525600`.
+- `--no-default-alerts` optional. By default, create applies configured default alerts and then any explicit `--alarm-minutes`, removing duplicates. Built-in defaults are 1440 and 120 minutes before start.
+
+Mutation responses include `hasStructuredLocation` but keep `structuredLocation` null, so precise coordinates are not echoed by default.
 
 Side effects: writes a new event to Calendar.
 
@@ -334,6 +423,16 @@ Success:
 ```json
 {
   "event": {
+    "alarms": [
+      {
+        "minutesBeforeStart": 1440,
+        "relativeOffsetSeconds": -86400
+      },
+      {
+        "minutesBeforeStart": 120,
+        "relativeOffsetSeconds": -7200
+      }
+    ],
     "allDay": false,
     "calendar": {
       "allowsModifications": true,
@@ -344,10 +443,12 @@ Success:
     },
     "endDate": "2026-05-08T14:00:00Z",
     "hasAlarms": true,
+    "hasStructuredLocation": false,
     "hasRecurrenceRules": false,
     "id": "EVENT-ID",
     "location": "Office",
     "startDate": "2026-05-08T13:00:00Z",
+    "structuredLocation": null,
     "title": "Project review",
     "url": "https://example.com"
   },
@@ -395,6 +496,7 @@ Success:
 ```json
 {
   "event": {
+    "alarms": [],
     "allDay": false,
     "calendar": {
       "allowsModifications": true,
@@ -405,10 +507,12 @@ Success:
     },
     "endDate": "2026-05-08T15:00:00Z",
     "hasAlarms": false,
+    "hasStructuredLocation": false,
     "hasRecurrenceRules": false,
     "id": "EVENT-ID",
     "location": "Room B",
     "startDate": "2026-05-08T14:00:00Z",
+    "structuredLocation": null,
     "title": "Updated review",
     "url": null
   },
@@ -448,6 +552,7 @@ Success:
 ```json
 {
   "deletedEvent": {
+    "alarms": [],
     "allDay": false,
     "calendar": {
       "allowsModifications": true,
@@ -458,10 +563,12 @@ Success:
     },
     "endDate": "2026-05-08T14:00:00Z",
     "hasAlarms": false,
+    "hasStructuredLocation": false,
     "hasRecurrenceRules": false,
     "id": "EVENT-ID",
     "location": "Office",
     "startDate": "2026-05-08T13:00:00Z",
+    "structuredLocation": null,
     "title": "Project review",
     "url": null
   },

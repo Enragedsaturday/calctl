@@ -35,18 +35,26 @@ Calendar contents are private. Keep reads and writes local unless the user expli
 - Any workflow that requires attendee management, invitations, recurrence creation, calendar creation/deletion, or cloud APIs.
 - Sharing private or sensitive identifiers with external services without explicit user approval.
 
-## Permission Notes
+## One-Time First-Run Setup
+
+Run setup once per Mac/user/profile before relying on this skill unattended:
 
 ```bash
-calctl auth status
+calctl --version
 calctl auth request
+calctl auth status
+calctl calendars list --writable-only
+calctl defaults show
 ```
 
-- `auth status` does not prompt.
-- `auth request` may show a macOS Calendar privacy prompt.
-- EventKit commands may prompt if status is `notDetermined`.
-- Full Calendar access is required for list/show/update/delete. Write-only Calendar access is insufficient.
-- If access is denied, the local operator must grant Calendar access in System Settings -> Privacy & Security -> Calendars.
+Setup goals:
+
+1. **Calendar Full Access:** `calctl auth request` should trigger/confirm the macOS Calendar permission. The final acceptable status is `authorized`/`fullAccess`. If denied, the local operator must grant Calendar access in System Settings -> Privacy & Security -> Calendars.
+2. **Writable calendar discovery:** verify at least one writable calendar exists and save useful aliases with `calctl alias set NAME CALENDAR_ID`.
+3. **Default alerts:** read `calctl defaults show`. Those `defaultAlertMinutes` are the skill default for future creates unless the user states different alerts or no alerts. The user may set one or more default alerts, e.g. `calctl defaults alerts --minutes 1440 --minutes 120 --minutes 15`. To use no alerts for a specific event, pass `--no-default-alerts` after approval.
+4. **Location permissions:** `calctl` itself does not need Location Services permission. The skill verifies/normalizes locations via explicit lookup, writes resolvable address strings or approved structured coordinates, and Calendar.app/system settings decide whether time-to-leave behavior is available.
+
+Do not request Automation, Reminders, Contacts, Mail, Messages, Full Disk Access, or unrelated permissions for this skill unless a future feature explicitly needs it and the user approves.
 
 ## Safety Rules
 
@@ -57,6 +65,9 @@ calctl auth request
 5. Timed inputs must include an explicit timezone (`Z` or `±HH:MM`). Ask if the timezone is ambiguous.
 6. For update/delete, show the event immediately before the write and confirm it is the intended event.
 7. Use `--span future` for recurring events only when the user explicitly approves future occurrences.
+8. Before creating an event, inspect the saved default alerts with `calctl defaults show` unless already known from first-run setup. Use those `defaultAlertMinutes` by default; the user can have any number of default alerts. Override only when the user states explicit alert minutes or asks for no alerts (`--no-default-alerts`). CalCTL's standard initial default is 1 day and 2 hours before start (`1440`, `120` minutes).
+9. Ambiguous or general locations must be looked up and confirmed before writing. `calctl` does not geocode; use a maps lookup outside `calctl` only when the user approves/needs it, then confirm the exact title/address/coordinates before passing structured location fields.
+10. EventKit does not expose Apple Calendar's traffic-aware time-to-leave/travel-time alert API. If a confirmed structured location is supplied, Calendar may offer time-to-leave behavior according to system settings, but do not promise or claim that `calctl` forced it.
 
 ## Approval Templates
 
@@ -68,9 +79,11 @@ Title: <title>
 Calendar: <calendar title/alias/ID or default calendar>
 When: <start/end with timezone or all-day date>
 Location: <location or none>
+Structured location: <none / confirmed title and coordinates>
 Notes: <none / present but not displayed / displayed with approval>
 URL: <url or none>
-Alarms: <alarm minutes or none>
+Alarms: <configured defaults from `calctl defaults show` / explicit minutes / none with --no-default-alerts>
+Time-to-leave: <not forced by calctl; may be handled by Calendar if structured location and system settings allow>
 
 Approve creating this event?
 ```
@@ -113,6 +126,14 @@ calctl alias list
 calctl alias remove work
 ```
 
+Defaults:
+
+```bash
+calctl defaults show
+calctl defaults alerts --minutes 1440 --minutes 120
+calctl defaults reset-alerts
+```
+
 List events:
 
 ```bash
@@ -139,6 +160,22 @@ calctl events create \
   --end 2026-05-08T10:00:00-04:00 \
   --location "Office" \
   --alarm-minutes 15 \
+  --force
+```
+
+Create with confirmed structured location after approval:
+
+```bash
+calctl events create \
+  --calendar work \
+  --title "Project review" \
+  --start 2026-05-08T09:00:00-04:00 \
+  --end 2026-05-08T10:00:00-04:00 \
+  --location "Office" \
+  --structured-location-title "Office, 123 Example St" \
+  --latitude 40.7128 \
+  --longitude=-74.0060 \
+  --radius-meters 100 \
   --force
 ```
 
@@ -172,6 +209,9 @@ calctl events delete EVENT_ID --span this --force
 - Swift ArgumentParser usage errors may be non-JSON. Treat non-JSON output with nonzero exit as a command construction bug and fix the invocation.
 - Verify writes by reading back with `calctl events show EVENT_ID` after create/update. For delete, use the `deletedEvent` snapshot returned by the delete command.
 - Do not assume JSON key order.
+- All-day events include `startDateOnly`, `endDateOnly`, and `endDateSemantics: "exclusive"`; use these for display. `startDate`/`endDate` remain for compatibility and are UTC serializations of floating/default-timezone all-day dates.
+- Alarm details are exposed in `alarms`; before-start relative alarms use nonpositive `relativeOffsetSeconds` and `minutesBeforeStart`.
+- Event JSON includes `hasStructuredLocation` by default, but `structuredLocation` remains null unless `events list/show --include-structured-location` is explicit. Only request precise coordinates when needed and approved.
 
 Expected write result keys:
 
@@ -186,6 +226,8 @@ Expected write result keys:
 - Stale event ID: run a fresh list/show search and ask the user to confirm the current event before retrying a write.
 - JSON parse failure: check whether the command failed during ArgumentParser usage; fix flags/arguments before retrying.
 - Timezone ambiguity: ask for timezone or use a clearly stated user-provided default. Do not silently invent an offset.
+- Location ambiguity: ask for the exact place/address. If the user gives a general place name, look it up and confirm the selected result before using structured fields.
+- Alert ambiguity: ask whether to use the configured defaults, explicit alert minutes, no alerts with `--no-default-alerts`, or a saved defaults update.
 - Missing `--force`: this is expected before approval. Get approval, then rerun with `--force`.
 - Recurrence uncertainty: default to `--span this`; ask before using `--span future`.
 - Retry policy: retry only after changing the cause, such as permission, stale ID, invalid timestamp, or missing approval. Do not repeat a write blindly.
@@ -196,6 +238,8 @@ Expected write result keys:
 - [ ] Permission status was checked when needed.
 - [ ] Notes were omitted unless explicitly needed.
 - [ ] Timed dates include explicit timezone.
+- [ ] Alert defaults or explicit/no-alert choice were confirmed.
+- [ ] Ambiguous/general locations were looked up and confirmed before structured location write.
 - [ ] Create/update/delete details were approved before `--force`.
 - [ ] JSON was parsed and `status` was checked.
 - [ ] Write was verified by show/readback, or delete snapshot was reported.
@@ -210,6 +254,7 @@ Expected write result keys:
 - No direct cloud Calendar APIs.
 - EventKit IDs can become stale after sync or relaunch.
 - Create/update/delete responses omit notes.
+- `calctl` cannot force Apple Calendar time-to-leave alerts; it can only provide location/structured coordinates for Calendar to use when supported by local settings.
 - Runtime errors are JSON, but CLI usage errors may be non-JSON.
 
 ## Local Overlay Guidance

@@ -68,6 +68,18 @@ calctl events create \
   --force
 ```
 
+Default alerts are applied to new events unless `--no-default-alerts` is passed. The built-in defaults are 1 day and 2 hours before start:
+
+```bash
+calctl defaults show
+calctl defaults alerts --minutes 1440 --minutes 120
+calctl defaults reset-alerts
+```
+
+Events can include plain text locations with `--location`. Structured locations can also be supplied without network lookup by passing `--structured-location-title` and, when known, `--latitude` plus `--longitude` and optional `--radius-meters`; use equals form for negative values, e.g. `--longitude=-73.9821524`. Event JSON reports `hasStructuredLocation` by default, but precise structured coordinates are only emitted by `events list/show --include-structured-location`.
+
+All-day event JSON includes date-only fields with an exclusive end date (`startDateOnly`, `endDateOnly`, `endDateSemantics`) so consumers do not need to interpret UTC instants for floating all-day events.
+
 ## Documentation
 
 - [Command Reference](docs/command-reference.md)

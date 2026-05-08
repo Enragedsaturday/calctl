@@ -56,11 +56,23 @@ Example:
 | `startDate` | Yes | No | No | string | ISO 8601 UTC timestamp emitted by `ISO8601DateFormatter`. |
 | `endDate` | Yes | No | No | string | ISO 8601 UTC timestamp emitted by `ISO8601DateFormatter`. |
 | `allDay` | Yes | No | No | boolean | All-day flag. |
+| `startDateOnly` | Optional | No | No | string | Present for all-day events. Local `YYYY-MM-DD` start date. |
+| `endDateOnly` | Optional | No | No | string | Present for all-day events. Local exclusive `YYYY-MM-DD` end date. |
+| `endDateSemantics` | Optional | No | No | string | Present for all-day events. Currently `"exclusive"`. |
 | `location` | Yes | Yes | Possible | string or null | Location text may contain private content. |
+| `hasStructuredLocation` | Yes | No | No | boolean | Whether EventKit exposes a structured location for the event. |
+| `structuredLocation` | Yes | Yes | Possible | object or null | `null` by default. Present only when explicitly requested with `--include-structured-location`. |
+| `structuredLocation.title` | Optional | No | Possible | string | Location title. |
+| `structuredLocation.latitude` | Optional | Yes | Yes | number or null | Latitude when coordinates are present and structured location output is explicitly requested. |
+| `structuredLocation.longitude` | Optional | Yes | Yes | number or null | Longitude when coordinates are present and structured location output is explicitly requested. |
+| `structuredLocation.radiusMeters` | Optional | No | No | number | Structured location radius in meters. |
 | `url` | Yes | Yes | Possible | string or null | URL may contain sensitive identifiers. |
 | `hasAlarms` | Yes | No | No | boolean | Whether one or more alarms exist. |
+| `alarms` | Yes | No | No | array | Alarm metadata. Relative before-start alerts include `relativeOffsetSeconds <= 0` and `minutesBeforeStart`. Absolute alarm dates may appear for existing events. |
 | `hasRecurrenceRules` | Yes | No | No | boolean | Whether recurrence rules exist. |
 | `notes` | Optional | Yes | Yes | string or null | Present only when `--include-notes` is explicit for list/show. Mutation and delete responses omit notes. |
+
+For all-day events, `startDate` and `endDate` are retained for compatibility but may look surprising because all-day EventKit dates are floating/default-timezone values serialized as UTC instants. Prefer `startDateOnly`, `endDateOnly`, and `endDateSemantics` for display and date math. `endDateOnly` is exclusive.
 
 ## Command Result Schemas
 
@@ -122,6 +134,17 @@ Commands: `calctl alias set`, `calctl alias remove`
 | `name` | Optional | No | Possible | string | Present for `alias remove`. |
 | `configPath` | Optional | No | Possible | string | Present for `alias set`. |
 
+### `DefaultsResult`
+
+Commands: `calctl defaults show`, `calctl defaults alerts`, `calctl defaults reset-alerts`
+
+| Field | Required | Nullable | Note-sensitive | Type | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `status` | Yes | No | No | string | Always `"success"` on success. |
+| `defaultAlertMinutes` | Yes | No | No | array of integer | Default before-start alert offsets in minutes. Built-in default is `[1440, 120]`. |
+| `configPath` | Yes | No | Possible | string | Local filesystem path. |
+| `message` | Optional | No | No | string | Present for mutation commands. |
+
 ### `EventListResult`
 
 Command: `calctl events list`
@@ -173,3 +196,9 @@ Command: `calctl events delete`
 - `events show` omits `notes` unless `--include-notes` is explicit.
 - `events create` and `events update` may write notes when `--notes` is supplied, but response JSON omits notes.
 - `events delete` returns a deleted-event snapshot without notes.
+
+## Structured Location Policy
+
+- Event JSON includes `hasStructuredLocation` by default.
+- Event JSON keeps `structuredLocation` as `null` by default, including mutation and delete responses.
+- `events list --include-structured-location` and `events show --include-structured-location` include the structured location object and any coordinates EventKit exposes.

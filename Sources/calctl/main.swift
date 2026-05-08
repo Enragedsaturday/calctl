@@ -1,5 +1,6 @@
 import ArgumentParser
 import CalCtlCore
+import CoreLocation
 import EventKit
 import Foundation
 
@@ -9,7 +10,7 @@ struct CalCtl: ParsableCommand {
         commandName: "calctl",
         abstract: "Local-only macOS Calendar CLI using EventKit with JSON output and guarded writes.",
         version: "0.1.0",
-        subcommands: [Auth.self, Calendars.self, Events.self, Alias.self],
+        subcommands: [Auth.self, Calendars.self, Events.self, Alias.self, Defaults.self],
         defaultSubcommand: Calendars.self
     )
 }
@@ -85,6 +86,7 @@ struct EventsList: ParsableCommand {
     @Option(help: "Range end, ISO 8601 with timezone, e.g. 2026-05-09T00:00:00-04:00") var to: String
     @Option(help: "Maximum returned events after sorting by start date.") var limit: Int = 200
     @Flag(help: "Include notes field in output. Notes may contain sensitive data; default omits them.") var includeNotes = false
+    @Flag(help: "Include structured location object with precise coordinates. Default only reports whether one exists.") var includeStructuredLocation = false
 
     func run() throws {
         do {
@@ -96,7 +98,7 @@ struct EventsList: ParsableCommand {
             let calendarID = try calendar.map { try store.resolve($0) }
             let client = EventKitClient()
             try client.ensureEventAccess()
-            let events = try client.listEvents(calendarID: calendarID, from: start, to: end, limit: limit, includeNotes: includeNotes)
+            let events = try client.listEvents(calendarID: calendarID, from: start, to: end, limit: limit, includeNotes: includeNotes, includeStructuredLocation: includeStructuredLocation)
             print(Output.success(["events": events, "count": events.count]))
         } catch {
             print(Output.error(String(describing: error)))
@@ -109,12 +111,13 @@ struct EventsShow: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "show", abstract: "Show one event by ID.")
     @Argument(help: "Event identifier from list/create output.") var eventID: String
     @Flag(help: "Include notes field in output. Notes may contain sensitive data; default omits them.") var includeNotes = false
+    @Flag(help: "Include structured location object with precise coordinates. Default only reports whether one exists.") var includeStructuredLocation = false
 
     func run() throws {
         do {
             let client = EventKitClient()
             try client.ensureEventAccess()
-            let event = try client.showEvent(eventID: eventID, includeNotes: includeNotes)
+            let event = try client.showEvent(eventID: eventID, includeNotes: includeNotes, includeStructuredLocation: includeStructuredLocation)
             print(Output.success(["event": event]))
         } catch {
             print(Output.error(String(describing: error)))
@@ -132,20 +135,28 @@ struct EventsCreate: ParsableCommand {
     @Option(help: "Timed end, ISO 8601 with timezone. Required unless --date is used.") var end: String?
     @Option(help: "All-day event date as YYYY-MM-DD. Mutually exclusive with --start/--end.") var date: String?
     @Option(help: "Location text.") var location: String?
+    @Option(help: "Structured location title. Use with optional --latitude/--longitude.") var structuredLocationTitle: String?
+    @Option(help: "Structured location latitude. Must be paired with --longitude.") var latitude: Double?
+    @Option(help: "Structured location longitude. Must be paired with --latitude.") var longitude: Double?
+    @Option(help: "Structured location radius in meters. Requires --latitude and --longitude.") var radiusMeters: Double?
     @Option(help: "Notes text.") var notes: String?
     @Option(help: "URL associated with the event.") var url: String?
     @Option(help: "Add an alarm N minutes before start. Can be repeated.") var alarmMinutes: [Int] = []
+    @Flag(help: "Do not apply configured default alerts to this event.") var noDefaultAlerts = false
     @Flag(help: "Required for writes. Prevents accidental event creation by agent/tooling.") var force = false
 
     func run() throws {
         do {
             try Safety.requireForce(force, action: "create event")
-            let preflight = try EventPreflight.validateCreate(title: title, start: start, end: end, allDayDate: date, url: url, alarmMinutes: alarmMinutes)
             let store = ConfigStore()
+            let config = try store.load()
+            let effectiveAlarmMinutes = try AlertDefaults.merge(defaults: config.defaultAlertMinutes, explicit: alarmMinutes, includeDefaults: !noDefaultAlerts)
+            let structuredLocation = try StructuredLocationInput.validate(title: structuredLocationTitle, latitude: latitude, longitude: longitude, radiusMeters: radiusMeters)
+            let preflight = try EventPreflight.validateCreate(title: title, start: start, end: end, allDayDate: date, url: url, alarmMinutes: effectiveAlarmMinutes)
             let calendarID = try calendar.map { try store.resolve($0) }
             let client = EventKitClient()
             try client.ensureEventAccess()
-            let event = try client.createEvent(calendarID: calendarID, preflight: preflight, location: location, notes: notes)
+            let event = try client.createEvent(calendarID: calendarID, preflight: preflight, location: location, structuredLocation: structuredLocation, notes: notes)
             print(Output.success(["message": "Event created", "event": event]))
         } catch {
             print(Output.error(String(describing: error)))
@@ -207,6 +218,71 @@ struct EventsDelete: ParsableCommand {
             try client.ensureEventAccess()
             let deleted = try client.deleteEvent(eventID: eventID, span: span)
             print(Output.success(["message": "Event deleted", "deletedEvent": deleted]))
+        } catch {
+            print(Output.error(String(describing: error)))
+            throw ExitCode.failure
+        }
+    }
+}
+
+// MARK: - Defaults
+
+struct Defaults: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Manage local calctl defaults.", subcommands: [DefaultsShow.self, DefaultsAlerts.self, DefaultsResetAlerts.self], defaultSubcommand: DefaultsShow.self)
+}
+
+struct DefaultsShow: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "show", abstract: "Show local defaults from ~/.calctl/config.json.")
+
+    func run() throws {
+        do {
+            let store = ConfigStore()
+            let config = try store.load()
+            print(Output.success([
+                "defaultAlertMinutes": config.defaultAlertMinutes,
+                "configPath": store.fileURL.path
+            ]))
+        } catch {
+            print(Output.error(String(describing: error)))
+            throw ExitCode.failure
+        }
+    }
+}
+
+struct DefaultsAlerts: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "alerts", abstract: "Set default alert minutes before event start.")
+
+    @Option(name: .customLong("minutes"), help: "Default alert N minutes before start. Repeat for multiple alerts.") var minutes: [Int] = []
+
+    func run() throws {
+        do {
+            guard !minutes.isEmpty else { throw CalCtlError.validation("Supply at least one --minutes value") }
+            let store = ConfigStore()
+            let config = try store.setDefaultAlertMinutes(minutes)
+            print(Output.success([
+                "message": "Default alerts updated",
+                "defaultAlertMinutes": config.defaultAlertMinutes,
+                "configPath": store.fileURL.path
+            ]))
+        } catch {
+            print(Output.error(String(describing: error)))
+            throw ExitCode.failure
+        }
+    }
+}
+
+struct DefaultsResetAlerts: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "reset-alerts", abstract: "Reset default alerts to 1 day and 2 hours before start.")
+
+    func run() throws {
+        do {
+            let store = ConfigStore()
+            let config = try store.resetDefaultAlertMinutes()
+            print(Output.success([
+                "message": "Default alerts reset",
+                "defaultAlertMinutes": config.defaultAlertMinutes,
+                "configPath": store.fileURL.path
+            ]))
         } catch {
             print(Output.error(String(describing: error)))
             throw ExitCode.failure
@@ -331,7 +407,7 @@ final class EventKitClient {
             .map(calendarDict)
     }
 
-    func listEvents(calendarID: String?, from: Date, to: Date, limit: Int, includeNotes: Bool) throws -> [[String: Any]] {
+    func listEvents(calendarID: String?, from: Date, to: Date, limit: Int, includeNotes: Bool, includeStructuredLocation: Bool) throws -> [[String: Any]] {
         let calendars: [EKCalendar]?
         if let calendarID {
             guard let calendar = eventStore.calendar(withIdentifier: calendarID) else { throw CalCtlError.validation("Calendar not found: \(calendarID)") }
@@ -340,15 +416,15 @@ final class EventKitClient {
             calendars = nil
         }
         let predicate = eventStore.predicateForEvents(withStart: from, end: to, calendars: calendars)
-        return Array(eventStore.events(matching: predicate).sorted { $0.startDate < $1.startDate }.prefix(limit)).map { eventDict($0, includeNotes: includeNotes) }
+        return Array(eventStore.events(matching: predicate).sorted { $0.startDate < $1.startDate }.prefix(limit)).map { eventDict($0, includeNotes: includeNotes, includeStructuredLocation: includeStructuredLocation) }
     }
 
-    func showEvent(eventID: String, includeNotes: Bool) throws -> [String: Any] {
+    func showEvent(eventID: String, includeNotes: Bool, includeStructuredLocation: Bool) throws -> [String: Any] {
         guard let event = eventStore.event(withIdentifier: eventID) else { throw CalCtlError.validation("Event not found: \(eventID)") }
-        return eventDict(event, includeNotes: includeNotes)
+        return eventDict(event, includeNotes: includeNotes, includeStructuredLocation: includeStructuredLocation)
     }
 
-    func createEvent(calendarID: String?, preflight: CreateEventPreflight, location: String?, notes: String?) throws -> [String: Any] {
+    func createEvent(calendarID: String?, preflight: CreateEventPreflight, location: String?, structuredLocation: StructuredLocationInput?, notes: String?) throws -> [String: Any] {
         let calendar: EKCalendar
         if let calendarID {
             guard let found = eventStore.calendar(withIdentifier: calendarID) else { throw CalCtlError.validation("Calendar not found: \(calendarID)") }
@@ -362,17 +438,34 @@ final class EventKitClient {
         let event = EKEvent(eventStore: eventStore)
         event.calendar = calendar
         event.title = preflight.title
-        event.isAllDay = preflight.isAllDay
-        event.startDate = preflight.startDate
-        event.endDate = preflight.endDate
+        if preflight.isAllDay {
+            event.startDate = preflight.startDate
+            event.endDate = preflight.endDate
+            event.isAllDay = true
+        } else {
+            event.isAllDay = false
+            event.startDate = preflight.startDate
+            event.endDate = preflight.endDate
+        }
         event.location = location
+        if let structuredLocation {
+            let title = structuredLocation.title ?? location ?? "Location"
+            let eventLocation = EKStructuredLocation(title: title)
+            if let latitude = structuredLocation.latitude, let longitude = structuredLocation.longitude {
+                eventLocation.geoLocation = CLLocation(latitude: latitude, longitude: longitude)
+                if let radiusMeters = structuredLocation.radiusMeters {
+                    eventLocation.radius = radiusMeters
+                }
+            }
+            event.structuredLocation = eventLocation
+        }
         event.notes = notes
         event.url = preflight.url
         for minutes in preflight.alarmMinutes {
             event.addAlarm(EKAlarm(relativeOffset: TimeInterval(-minutes * 60)))
         }
         try eventStore.save(event, span: .thisEvent, commit: true)
-        return eventDict(event, includeNotes: EventOutputPolicy.mutationIncludeNotesByDefault)
+        return eventDict(event, includeNotes: EventOutputPolicy.mutationIncludeNotesByDefault, includeStructuredLocation: false)
     }
 
     func updateEvent(eventID: String, preflight: UpdateEventPreflight, location: String?, clearLocation: Bool, notes: String?, clearNotes: Bool) throws -> [String: Any] {
@@ -389,13 +482,13 @@ final class EventKitClient {
         if clearNotes { event.notes = nil }
         else if let notes { event.notes = notes }
         try eventStore.save(event, span: ekSpan(preflight.span), commit: true)
-        return eventDict(event, includeNotes: EventOutputPolicy.mutationIncludeNotesByDefault)
+        return eventDict(event, includeNotes: EventOutputPolicy.mutationIncludeNotesByDefault, includeStructuredLocation: false)
     }
 
     func deleteEvent(eventID: String, span: EventSpan) throws -> [String: Any] {
         guard let event = eventStore.event(withIdentifier: eventID) else { throw CalCtlError.validation("Event not found: \(eventID)") }
         guard event.calendar.allowsContentModifications else { throw CalCtlError.validation("Calendar does not allow modifications: \(event.calendar.title)") }
-        let snapshot = eventDict(event, includeNotes: false)
+        let snapshot = eventDict(event, includeNotes: false, includeStructuredLocation: false)
         try eventStore.remove(event, span: ekSpan(span), commit: true)
         return snapshot
     }
@@ -417,7 +510,8 @@ final class EventKitClient {
         ]
     }
 
-    private func eventDict(_ event: EKEvent, includeNotes: Bool) -> [String: Any] {
+    private func eventDict(_ event: EKEvent, includeNotes: Bool, includeStructuredLocation: Bool) -> [String: Any] {
+        let hasStructuredLocation = event.structuredLocation != nil
         var dict: [String: Any] = [
             "id": event.eventIdentifier ?? "",
             "title": event.title ?? "",
@@ -426,12 +520,59 @@ final class EventKitClient {
             "endDate": DateParser.isoString(event.endDate),
             "allDay": event.isAllDay,
             "location": event.location ?? NSNull(),
+            "hasStructuredLocation": hasStructuredLocation,
+            "structuredLocation": includeStructuredLocation ? structuredLocationDict(event.structuredLocation) : NSNull(),
             "url": event.url?.absoluteString ?? NSNull(),
             "hasAlarms": event.hasAlarms,
+            "alarms": alarmDicts(event.alarms),
             "hasRecurrenceRules": event.hasRecurrenceRules
         ]
+        if event.isAllDay {
+            let calendar = Calendar.current
+            dict["startDateOnly"] = dateOnlyString(from: event.startDate, calendar: calendar)
+            dict["endDateOnly"] = DateParser.allDayExclusiveEndDateOnly(from: event.endDate, calendar: calendar)
+            dict["endDateSemantics"] = "exclusive"
+        }
         if includeNotes { dict["notes"] = event.notes ?? NSNull() }
         return dict
+    }
+
+    private func alarmDicts(_ alarms: [EKAlarm]?) -> [[String: Any]] {
+        guard let alarms else { return [] }
+        return alarms.map { alarm in
+            var dict: [String: Any] = [:]
+            if alarm.relativeOffset != 0 || alarm.absoluteDate == nil {
+                dict["relativeOffsetSeconds"] = Int(alarm.relativeOffset)
+                if alarm.relativeOffset <= 0 {
+                    dict["minutesBeforeStart"] = Int((-alarm.relativeOffset / 60).rounded())
+                }
+            }
+            if let absoluteDate = alarm.absoluteDate {
+                dict["absoluteDate"] = DateParser.isoString(absoluteDate)
+            }
+            return dict
+        }
+    }
+
+    private func structuredLocationDict(_ structuredLocation: EKStructuredLocation?) -> Any {
+        guard let structuredLocation else { return NSNull() }
+        var dict: [String: Any] = [
+            "title": structuredLocation.title ?? NSNull(),
+            "radiusMeters": structuredLocation.radius
+        ]
+        if let coordinate = structuredLocation.geoLocation?.coordinate {
+            dict["latitude"] = coordinate.latitude
+            dict["longitude"] = coordinate.longitude
+        } else {
+            dict["latitude"] = NSNull()
+            dict["longitude"] = NSNull()
+        }
+        return dict
+    }
+
+    private func dateOnlyString(from date: Date, calendar: Calendar) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
     }
 }
 

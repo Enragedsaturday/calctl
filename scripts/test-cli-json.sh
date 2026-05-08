@@ -204,6 +204,44 @@ test_alias_remove_missing_errors_json() {
     assert_json "alias remove missing" "$out" "status=error" "contains:error:Alias not found" || return 1
 }
 
+test_defaults_show_and_alerts_lifecycle() {
+    local home_dir
+    home_dir="$(mktemp -d "$TMP_HOME_ROOT/home.XXXXXX")"
+    local out err
+    run_calctl_in_home "$home_dir" 0 out err -- defaults show || return 1
+    assert_json "defaults show initial" "$out" "status=success" "type:defaultAlertMinutes:list" "has:configPath" || return 1
+    if ! python3 - "$out" <<'PY'
+import json, sys
+obj = json.loads(sys.argv[1])
+if obj.get("defaultAlertMinutes") != [1440, 120]:
+    sys.exit(f"unexpected initial defaults: {obj.get('defaultAlertMinutes')!r}")
+PY
+    then
+        echo "  initial defaults mismatch"
+        return 1
+    fi
+    run_calctl_in_home "$home_dir" 0 out err -- defaults alerts --minutes 60 --minutes 10 --minutes 60 || return 1
+    assert_json "defaults alerts set" "$out" "status=success" "has:message" "type:defaultAlertMinutes:list" || return 1
+    if ! python3 - "$out" <<'PY'
+import json, sys
+obj = json.loads(sys.argv[1])
+if obj.get("defaultAlertMinutes") != [60, 10]:
+    sys.exit(f"unexpected updated defaults: {obj.get('defaultAlertMinutes')!r}")
+PY
+    then
+        echo "  updated defaults mismatch"
+        return 1
+    fi
+    run_calctl_in_home "$home_dir" 0 out err -- defaults reset-alerts || return 1
+    assert_json "defaults alerts reset" "$out" "status=success" "has:message" "type:defaultAlertMinutes:list" || return 1
+}
+
+test_defaults_alerts_bad_value_errors_json() {
+    local out err
+    run_calctl 1 out err -- defaults alerts --minutes 525601 || return 1
+    assert_json "defaults alerts bad value" "$out" "status=error" "has:error" || return 1
+}
+
 test_create_without_force_fails_before_eventkit() {
     local out err
     run_calctl 1 out err -- events create --title "No Force" --start 2026-05-08T09:00:00Z --end 2026-05-08T10:00:00Z || return 1
@@ -242,6 +280,14 @@ test_create_alarm_out_of_range_fails_pure_validation() {
     assert_json "events create alarm out of range" "$out" "status=error" "has:error" || return 1
 }
 
+test_create_structured_location_validation_fails_before_eventkit() {
+    local out err
+    run_calctl 1 out err -- events create --title "Bad Location" --start 2026-05-08T09:00:00Z --end 2026-05-08T10:00:00Z --structured-location-title "Office" --latitude 40 --force || return 1
+    assert_json "events create incomplete structured location" "$out" "status=error" "contains:error:latitude" || return 1
+    run_calctl 1 out err -- events create --title "Bad Location" --start 2026-05-08T09:00:00Z --end 2026-05-08T10:00:00Z --structured-location-title "Office" --latitude 91 --longitude 0 --force || return 1
+    assert_json "events create invalid structured latitude" "$out" "status=error" "contains:error:latitude" || return 1
+}
+
 test_update_no_fields_fails_pure_validation() {
     local out err
     run_calctl 1 out err -- events update FAKE-ID --force || return 1
@@ -271,12 +317,15 @@ run_test "alias list returns empty in fresh HOME"         test_alias_list_initia
 run_test "alias set/list/remove lifecycle"                test_alias_set_list_remove_lifecycle
 run_test "alias set rejects bad name with JSON error"     test_alias_set_bad_name_errors_json
 run_test "alias remove missing emits JSON error"          test_alias_remove_missing_errors_json
+run_test "defaults show/set/reset lifecycle"              test_defaults_show_and_alerts_lifecycle
+run_test "defaults alerts bad value emits JSON error"     test_defaults_alerts_bad_value_errors_json
 run_test "events create without --force fails as JSON"    test_create_without_force_fails_before_eventkit
 run_test "events update without --force fails as JSON"    test_update_without_force_fails_before_eventkit
 run_test "events delete without --force fails as JSON"    test_delete_without_force_fails_before_eventkit
 run_test "events create invalid all-day date pure-fails"  test_create_invalid_alldate_fails_pure_validation
 run_test "events create invalid URL pure-fails"           test_create_invalid_url_fails_pure_validation
 run_test "events create alarm out of range pure-fails"    test_create_alarm_out_of_range_fails_pure_validation
+run_test "events create structured location pure-fails"   test_create_structured_location_validation_fails_before_eventkit
 run_test "events update no fields pure-fails"             test_update_no_fields_fails_pure_validation
 run_test "events update bad span pure-fails"              test_update_bad_span_fails_pure_validation
 run_test "events delete bad span pure-fails"              test_delete_bad_span_fails_pure_validation
