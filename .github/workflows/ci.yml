@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Core tests
+        run: swift run calctl-tests
+      - name: Build executable
+        run: swift build --product calctl
+      - name: Release build and privacy packaging check
+        run: |
+          scripts/build-release.sh
+          codesign -dv --verbose=4 .build/release/calctl 2>&1 | tee /tmp/calctl-codesign.txt
+          grep -q 'Info.plist entries=' /tmp/calctl-codesign.txt
+          codesign -d --entitlements :- .build/release/calctl > /tmp/calctl-entitlements.plist
+          grep -q 'com.apple.security.personal-information.calendars' /tmp/calctl-entitlements.plist
+          otool -l .build/release/calctl | grep -q '__info_plist'
+          strings .build/release/calctl | grep -q 'NSCalendarsFullAccessUsageDescription'

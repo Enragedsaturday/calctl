@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.johngalt.calctl</string>
+    <key>CFBundleName</key>
+    <string>calctl</string>
+    <key>CFBundleExecutable</key>
+    <string>calctl</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>calctl needs full Calendar access to list, create, update, and delete calendar events at your explicit command.</string>
+    <key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+    <string>calctl can create calendar events at your explicit command.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>calctl needs Calendar access to manage calendar events at your explicit command.</string>
+</dict>
+</plist>
