@@ -32,8 +32,14 @@ struct AuthRequest: ParsableCommand {
     func run() throws {
         do {
             let granted = try EventKitClient().requestEventAccess()
-            print(Output.success(["entity": "event", "granted": granted, "authorizationStatus": EventKitClient.authorizationStatusString()]))
-            if !granted { throw ExitCode.failure }
+            if granted {
+                print(Output.success(["entity": "event", "granted": true, "authorizationStatus": EventKitClient.authorizationStatusString()]))
+            } else {
+                print(Output.error("Calendar access was not granted"))
+                throw ExitCode.failure
+            }
+        } catch let exitCode as ExitCode {
+            throw exitCode
         } catch {
             print(Output.error(String(describing: error)))
             throw ExitCode.failure
@@ -134,11 +140,12 @@ struct EventsCreate: ParsableCommand {
     func run() throws {
         do {
             try Safety.requireForce(force, action: "create event")
+            let preflight = try EventPreflight.validateCreate(title: title, start: start, end: end, allDayDate: date, url: url, alarmMinutes: alarmMinutes)
             let store = ConfigStore()
             let calendarID = try calendar.map { try store.resolve($0) }
             let client = EventKitClient()
             try client.ensureEventAccess()
-            let event = try client.createEvent(calendarID: calendarID, title: title, start: start, end: end, allDayDate: date, location: location, notes: notes, url: url, alarmMinutes: alarmMinutes)
+            let event = try client.createEvent(calendarID: calendarID, preflight: preflight, location: location, notes: notes)
             print(Output.success(["message": "Event created", "event": event]))
         } catch {
             print(Output.error(String(describing: error)))
@@ -164,11 +171,19 @@ struct EventsUpdate: ParsableCommand {
     func run() throws {
         do {
             try Safety.requireForce(force, action: "update event")
-            try Safety.requireNotBoth(clearLocation, "--clear-location", location != nil, "--location")
-            try Safety.requireNotBoth(clearNotes, "--clear-notes", notes != nil, "--notes")
+            let preflight = try EventPreflight.validateUpdate(
+                title: title,
+                start: start,
+                end: end,
+                location: location,
+                clearLocation: clearLocation,
+                notes: notes,
+                clearNotes: clearNotes,
+                span: span
+            )
             let client = EventKitClient()
             try client.ensureEventAccess()
-            let event = try client.updateEvent(eventID: eventID, title: title, start: start, end: end, location: location, clearLocation: clearLocation, notes: notes, clearNotes: clearNotes, span: span)
+            let event = try client.updateEvent(eventID: eventID, preflight: preflight, location: location, clearLocation: clearLocation, notes: notes, clearNotes: clearNotes)
             print(Output.success(["message": "Event updated", "event": event]))
         } catch {
             print(Output.error(String(describing: error)))
@@ -187,6 +202,7 @@ struct EventsDelete: ParsableCommand {
     func run() throws {
         do {
             try Safety.requireForce(force, action: "delete event")
+            let span = try EventPreflight.validateSpan(span)
             let client = EventKitClient()
             try client.ensureEventAccess()
             let deleted = try client.deleteEvent(eventID: eventID, span: span)
@@ -332,7 +348,7 @@ final class EventKitClient {
         return eventDict(event, includeNotes: includeNotes)
     }
 
-    func createEvent(calendarID: String?, title: String, start: String?, end: String?, allDayDate: String?, location: String?, notes: String?, url: String?, alarmMinutes: [Int]) throws -> [String: Any] {
+    func createEvent(calendarID: String?, preflight: CreateEventPreflight, location: String?, notes: String?) throws -> [String: Any] {
         let calendar: EKCalendar
         if let calendarID {
             guard let found = eventStore.calendar(withIdentifier: calendarID) else { throw CalCtlError.validation("Calendar not found: \(calendarID)") }
@@ -345,64 +361,38 @@ final class EventKitClient {
         guard calendar.allowsContentModifications else { throw CalCtlError.validation("Calendar does not allow modifications: \(calendar.title)") }
         let event = EKEvent(eventStore: eventStore)
         event.calendar = calendar
-        event.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !event.title.isEmpty else { throw CalCtlError.validation("Event title cannot be blank") }
-
-        if let allDayDate {
-            guard start == nil && end == nil else { throw CalCtlError.validation("Use either --date or --start/--end, not both") }
-            let comps = try DateParser.parseAllDayDate(allDayDate)
-            guard let startDate = comps.calendar?.date(from: comps), let endDate = comps.calendar?.date(byAdding: .day, value: 1, to: startDate) else {
-                throw CalCtlError.invalidDate("Could not build all-day date")
-            }
-            event.isAllDay = true
-            event.startDate = startDate
-            event.endDate = endDate
-        } else {
-            guard let start, let end else { throw CalCtlError.validation("Timed events require both --start and --end; all-day events require --date") }
-            let startDate = try DateParser.parseTimed(start)
-            let endDate = try DateParser.parseTimed(end)
-            _ = try EventDraft.validateTimed(title: title, start: startDate, end: endDate)
-            event.isAllDay = false
-            event.startDate = startDate
-            event.endDate = endDate
-        }
+        event.title = preflight.title
+        event.isAllDay = preflight.isAllDay
+        event.startDate = preflight.startDate
+        event.endDate = preflight.endDate
         event.location = location
         event.notes = notes
-        if let url { event.url = try Safety.parseURL(url) }
-        for minutes in alarmMinutes {
-            guard minutes >= 0 && minutes <= 60 * 24 * 365 else { throw CalCtlError.validation("Alarm minutes must be between 0 and 525600") }
+        event.url = preflight.url
+        for minutes in preflight.alarmMinutes {
             event.addAlarm(EKAlarm(relativeOffset: TimeInterval(-minutes * 60)))
         }
         try eventStore.save(event, span: .thisEvent, commit: true)
-        return eventDict(event, includeNotes: true)
+        return eventDict(event, includeNotes: EventOutputPolicy.mutationIncludeNotesByDefault)
     }
 
-    func updateEvent(eventID: String, title: String?, start: String?, end: String?, location: String?, clearLocation: Bool, notes: String?, clearNotes: Bool, span: String) throws -> [String: Any] {
+    func updateEvent(eventID: String, preflight: UpdateEventPreflight, location: String?, clearLocation: Bool, notes: String?, clearNotes: Bool) throws -> [String: Any] {
         guard let event = eventStore.event(withIdentifier: eventID) else { throw CalCtlError.validation("Event not found: \(eventID)") }
         guard event.calendar.allowsContentModifications else { throw CalCtlError.validation("Calendar does not allow modifications: \(event.calendar.title)") }
-        var changed = false
-        if let title {
-            let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !cleaned.isEmpty else { throw CalCtlError.validation("Event title cannot be blank") }
-            event.title = cleaned; changed = true
+        if let title = preflight.title {
+            event.title = title
         }
-        if start != nil || end != nil {
-            guard let start, let end else { throw CalCtlError.validation("--start and --end must be supplied together") }
-            let startDate = try DateParser.parseTimed(start)
-            let endDate = try DateParser.parseTimed(end)
-            _ = try EventDraft.validateTimed(title: event.title ?? "event", start: startDate, end: endDate)
-            event.startDate = startDate; event.endDate = endDate; event.isAllDay = false; changed = true
+        if let startDate = preflight.startDate, let endDate = preflight.endDate {
+            event.startDate = startDate; event.endDate = endDate; event.isAllDay = false
         }
-        if clearLocation { event.location = nil; changed = true }
-        else if let location { event.location = location; changed = true }
-        if clearNotes { event.notes = nil; changed = true }
-        else if let notes { event.notes = notes; changed = true }
-        guard changed else { throw CalCtlError.validation("No update fields supplied") }
-        try eventStore.save(event, span: ekSpan(span), commit: true)
-        return eventDict(event, includeNotes: true)
+        if clearLocation { event.location = nil }
+        else if let location { event.location = location }
+        if clearNotes { event.notes = nil }
+        else if let notes { event.notes = notes }
+        try eventStore.save(event, span: ekSpan(preflight.span), commit: true)
+        return eventDict(event, includeNotes: EventOutputPolicy.mutationIncludeNotesByDefault)
     }
 
-    func deleteEvent(eventID: String, span: String) throws -> [String: Any] {
+    func deleteEvent(eventID: String, span: EventSpan) throws -> [String: Any] {
         guard let event = eventStore.event(withIdentifier: eventID) else { throw CalCtlError.validation("Event not found: \(eventID)") }
         guard event.calendar.allowsContentModifications else { throw CalCtlError.validation("Calendar does not allow modifications: \(event.calendar.title)") }
         let snapshot = eventDict(event, includeNotes: false)
@@ -410,11 +400,10 @@ final class EventKitClient {
         return snapshot
     }
 
-    private func ekSpan(_ raw: String) throws -> EKSpan {
-        switch raw {
-        case "this": return .thisEvent
-        case "future": return .futureEvents
-        default: throw CalCtlError.validation("Span must be 'this' or 'future'")
+    private func ekSpan(_ span: EventSpan) -> EKSpan {
+        switch span {
+        case .this: return .thisEvent
+        case .future: return .futureEvents
         }
     }
 

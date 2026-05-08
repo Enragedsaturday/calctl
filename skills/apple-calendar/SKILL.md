@@ -1,14 +1,15 @@
 ---
 name: apple-calendar
-description: "Use when managing Apple Calendar events locally on macOS with calctl: list calendars/events, create/update/delete events with explicit approval, and keep calendar data local."
+description: "Use when managing Apple Calendar events locally on macOS with calctl: check Calendar permission, list calendars/events, create/update/delete events only after explicit approval, parse JSON output, and keep calendar data local unless the user approves sharing."
 version: 1.0.0
-author: John Galt / Hermes Agent
+author: CalCTL contributors
 license: 0BSD
 platforms: [macos]
 metadata:
   hermes:
     tags: [Calendar, EventKit, macOS, scheduling, local-first]
-    related_skills: [apple-reminders]
+    command: calctl
+    public_safe: true
 prerequisites:
   commands: [calctl]
 ---
@@ -17,55 +18,92 @@ prerequisites:
 
 ## Overview
 
-Use `calctl` for local-only Apple Calendar event operations on macOS. `calctl` is a Swift/EventKit CLI that outputs JSON, embeds Calendar privacy usage strings, requests only Calendar access, omits notes by default, and requires `--force` for writes.
+Use `calctl` for local-only Apple Calendar event operations on macOS. `calctl` is a Swift/EventKit CLI with JSON runtime output, Calendar-only permissions, note-safe defaults, and guarded writes.
 
-Calendar contents are private. Keep reads and writes local unless Benjamin explicitly approves sharing calendar content with a cloud service. Do not send calendar details to another platform unless the user requested it.
+Calendar contents are private. Keep reads and writes local unless the user explicitly approves sharing specific calendar details with another tool or service.
 
 ## When to Use
 
-- User asks about Apple Calendar, Calendar.app, events, schedule, availability, or calendar cleanup.
-- User wants events listed from local Apple/iCloud/Exchange calendars exposed through EventKit.
-- User wants a calendar event created, updated, or deleted and has explicitly approved the final event details.
+- The user asks about Apple Calendar, Calendar.app, events, schedule, availability, or calendar cleanup.
+- The user wants events listed from local Apple/iCloud/Exchange calendars exposed through EventKit.
+- The user wants a calendar event created, updated, or deleted; use this skill to normalize details, obtain approval, run the guarded write, and verify the result.
 
-## When NOT to Use
+## When Not to Use
 
-- Agent reminders/alerts that do not need Apple Calendar → use Hermes `cronjob`.
-- Apple Reminders tasks → use `apple-reminders`.
-- Google Calendar directly → use Google Workspace tools if requested.
-- Any CJIS/legal/private identifiers going to cloud → keep local or ask for explicit approval.
+- Reminders or task lists. `calctl` does not manage Reminders.
+- Google Calendar or another provider directly, unless the provider is exposed through local Apple Calendar/EventKit.
+- Any workflow that requires attendee management, invitations, recurrence creation, calendar creation/deletion, or cloud APIs.
+- Sharing private or sensitive identifiers with external services without explicit user approval.
 
-## Safety Rules
-
-1. Reads may run locally after Calendar permission is granted.
-2. Never pass `--force` for create/update/delete until Benjamin explicitly approves the normalized action details.
-3. Before creating/updating/deleting, show:
-   - title
-   - calendar title/alias/ID
-   - start/end or all-day date
-   - timezone/offset
-   - location
-   - notes presence/content if relevant
-   - event ID for update/delete
-   - recurrence span (`this` or `future`) if applicable
-4. After a write, verify by reading back with `calctl events show EVENT_ID`; for delete, report the delete snapshot returned by the command.
-5. Notes can be sensitive. Do not include notes unless necessary; use `--include-notes` only when the user asked or the task requires it.
-6. Timed inputs must include an explicit timezone (`Z` or `±HH:MM`). Do not guess timezone if it changes the result.
-7. For destructive operations, first run `calctl events show EVENT_ID` and confirm it is the intended event.
-
-## Setup / Permission Check
+## Permission Notes
 
 ```bash
 calctl auth status
 calctl auth request
 ```
 
-If access is denied, Benjamin must grant Calendar access in:
+- `auth status` does not prompt.
+- `auth request` may show a macOS Calendar privacy prompt.
+- EventKit commands may prompt if status is `notDetermined`.
+- Full Calendar access is required for list/show/update/delete. Write-only Calendar access is insufficient.
+- If access is denied, the local operator must grant Calendar access in System Settings -> Privacy & Security -> Calendars.
 
-System Settings → Privacy & Security → Calendars
+## Safety Rules
+
+1. Reads may run locally after Calendar permission is granted.
+2. Never pass `--force` for create/update/delete until the user approves the normalized action details.
+3. Notes can be sensitive. Do not request or display notes unless necessary; use `--include-notes` only when the user asked or the task requires it.
+4. Create/update responses omit notes by default even when notes are written. Delete snapshots omit notes.
+5. Timed inputs must include an explicit timezone (`Z` or `±HH:MM`). Ask if the timezone is ambiguous.
+6. For update/delete, show the event immediately before the write and confirm it is the intended event.
+7. Use `--span future` for recurring events only when the user explicitly approves future occurrences.
+
+## Approval Templates
+
+Create approval:
+
+```text
+I will create this Apple Calendar event locally:
+Title: <title>
+Calendar: <calendar title/alias/ID or default calendar>
+When: <start/end with timezone or all-day date>
+Location: <location or none>
+Notes: <none / present but not displayed / displayed with approval>
+URL: <url or none>
+Alarms: <alarm minutes or none>
+
+Approve creating this event?
+```
+
+Update approval:
+
+```text
+I will update this Apple Calendar event locally:
+Event ID: <event id>
+Current: <title, time, calendar>
+Changes: <field-by-field changes>
+Recurring span: <this or future>
+Notes: <unchanged / cleared / replaced but not displayed / displayed with approval>
+
+Approve updating this event?
+```
+
+Delete approval:
+
+```text
+I will delete this Apple Calendar event locally:
+Event ID: <event id>
+Title: <title>
+Calendar: <calendar title/alias/ID>
+When: <start/end with timezone or all-day date>
+Recurring span: <this or future>
+
+Approve deleting this event?
+```
 
 ## Quick Reference
 
-### Calendars
+Calendars and aliases:
 
 ```bash
 calctl calendars list
@@ -75,7 +113,7 @@ calctl alias list
 calctl alias remove work
 ```
 
-### List Events
+List events:
 
 ```bash
 calctl events list \
@@ -84,23 +122,14 @@ calctl events list \
   --to 2026-05-09T00:00:00-04:00
 ```
 
-Search all calendars:
+Show event:
 
 ```bash
-calctl events list \
-  --from 2026-05-08T00:00:00-04:00 \
-  --to 2026-05-09T00:00:00-04:00
-```
-
-Include notes only when required:
-
-```bash
+calctl events show EVENT_ID
 calctl events show EVENT_ID --include-notes
 ```
 
-### Create Event
-
-First present the proposed event to Benjamin. Only after approval:
+Create event after approval:
 
 ```bash
 calctl events create \
@@ -113,21 +142,13 @@ calctl events create \
   --force
 ```
 
-All-day:
+Create all-day event after approval:
 
 ```bash
-calctl events create --calendar work --title "Court closed" --date 2026-05-08 --force
+calctl events create --calendar work --title "Office closed" --date 2026-05-08 --force
 ```
 
-### Update Event
-
-Preflight:
-
-```bash
-calctl events show EVENT_ID
-```
-
-After approval:
+Update event after approval:
 
 ```bash
 calctl events update EVENT_ID \
@@ -137,42 +158,60 @@ calctl events update EVENT_ID \
   --force
 ```
 
-Recurring event span:
-
-```bash
-calctl events update EVENT_ID --location "Room B" --span this --force
-calctl events update EVENT_ID --location "Room B" --span future --force
-```
-
-### Delete Event
-
-Preflight:
-
-```bash
-calctl events show EVENT_ID
-```
-
-After approval:
+Delete event after approval:
 
 ```bash
 calctl events delete EVENT_ID --span this --force
 ```
 
+## JSON Parsing and Verification
+
+- Parse stdout as JSON for successful runtime commands and runtime validation errors.
+- Require `"status": "success"` before trusting result fields.
+- For runtime failures, read `"error"` and stop unless the user asks to retry with changed inputs.
+- Swift ArgumentParser usage errors may be non-JSON. Treat non-JSON output with nonzero exit as a command construction bug and fix the invocation.
+- Verify writes by reading back with `calctl events show EVENT_ID` after create/update. For delete, use the `deletedEvent` snapshot returned by the delete command.
+- Do not assume JSON key order.
+
+Expected write result keys:
+
+- create/update: `status`, `message`, `event`.
+- delete: `status`, `message`, `deletedEvent`.
+- notes are absent from mutation and delete results.
+
+## Failure Handling
+
+- Denied TCC: explain that Calendar access must be granted in System Settings -> Privacy & Security -> Calendars; do not loop on the same command.
+- Write-only TCC: explain that full Calendar access is required for read/show/update/delete.
+- Stale event ID: run a fresh list/show search and ask the user to confirm the current event before retrying a write.
+- JSON parse failure: check whether the command failed during ArgumentParser usage; fix flags/arguments before retrying.
+- Timezone ambiguity: ask for timezone or use a clearly stated user-provided default. Do not silently invent an offset.
+- Missing `--force`: this is expected before approval. Get approval, then rerun with `--force`.
+- Recurrence uncertainty: default to `--span this`; ask before using `--span future`.
+- Retry policy: retry only after changing the cause, such as permission, stale ID, invalid timestamp, or missing approval. Do not repeat a write blindly.
+
 ## Verification Checklist
 
-- [ ] Calendar operation stayed local.
-- [ ] Calendar permission status checked if needed.
-- [ ] No notes exposed unless required.
+- [ ] Operation stayed local unless sharing was approved.
+- [ ] Permission status was checked when needed.
+- [ ] Notes were omitted unless explicitly needed.
 - [ ] Timed dates include explicit timezone.
 - [ ] Create/update/delete details were approved before `--force`.
-- [ ] Write result was parsed as JSON and verified.
-- [ ] Final response includes concise proof: command class run, event ID/title/time/calendar, and any residual risk.
+- [ ] JSON was parsed and `status` was checked.
+- [ ] Write was verified by show/readback, or delete snapshot was reported.
+- [ ] Final response includes concise proof: command class, event ID/title/time/calendar, and any residual risk.
 
-## Common Pitfalls
+## Limitations
 
-1. **Passing `--force` too early.** Approval first, command second.
-2. **Using timezone-less timestamps.** `calctl` rejects them; ask or infer only if context makes it unambiguous and label the assumption.
-3. **Forgetting notes are sensitive.** Default omit notes; use `--include-notes` sparingly.
-4. **Using stale EventKit IDs.** List/show immediately before update/delete.
-5. **Recurring events.** Default span is `this`; use `future` only when explicitly approved.
-6. **Write-only Calendar access.** Not enough for this skill; full Calendar access is required for read/show/update/delete.
+- Calendar events only; no Reminders.
+- No attendee/invite management.
+- No recurrence creation.
+- No calendar creation/deletion.
+- No direct cloud Calendar APIs.
+- EventKit IDs can become stale after sync or relaunch.
+- Create/update/delete responses omit notes.
+- Runtime errors are JSON, but CLI usage errors may be non-JSON.
+
+## Local Overlay Guidance
+
+Public skill defaults are intentionally generic. A local operator may maintain a private overlay with user-specific calendar aliases, preferred timezone assumptions, naming conventions, approval policies, or data-sharing restrictions. Keep that overlay outside the public skill and do not publish private calendar details.

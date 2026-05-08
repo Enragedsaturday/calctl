@@ -2,3 +2,7 @@
 .DS_Store
 .swiftpm/
 *.xcodeproj
+
+# Internal handoff/planning docs are local project-management artifacts, not public docs.
+docs/HANDOFF-*.md
+docs/plans/

@@ -1,18 +1,18 @@
 # calctl
 
-`calctl` is a local-only macOS Calendar command-line tool built on Apple EventKit. Command execution results are JSON, the release build embeds the required Calendar privacy strings in the Mach-O binary, and write/destructive operations require `--force` so agents and scripts do not silently mutate your calendar by accident.
+`calctl` is a local-only macOS Calendar command-line tool built on Apple EventKit. It prints JSON for successful runtime commands and runtime validation errors, requires `--force` for create/update/delete, and omits event notes by default because notes can contain sensitive information.
 
 ## Status
 
-Early `0.1.0` release. Calendar events only. Reminders are deliberately out of scope because Calendar and Reminders should request separate macOS privacy permissions.
+Early `0.1.0` release. Calendar events only. Reminders are deliberately out of scope.
 
 ## Requirements
 
 - macOS 13+
 - Swift 5.9+ / Xcode Command Line Tools
-- Calendar permission granted locally through macOS TCC
+- Full Calendar access granted locally through macOS TCC
 
-## Install from source
+## Install From Source
 
 ```bash
 git clone https://github.com/Enragedsaturday/calctl.git
@@ -21,67 +21,34 @@ scripts/build-release.sh
 sudo cp .build/release/calctl /usr/local/bin/calctl
 ```
 
-The build script:
-
-1. builds only the `calctl` product in release mode;
-2. embeds `Info.plist` via SwiftPM linker settings;
-3. ad-hoc signs the binary with the `com.apple.security.personal-information.calendars` entitlement.
-
-Verify the privacy packaging:
+The release build embeds Calendar privacy usage strings and is ad-hoc signed with the Calendar entitlement. Verify packaging with:
 
 ```bash
-codesign -dv --verbose=4 .build/release/calctl 2>&1 | grep 'Info.plist'
-codesign -d --entitlements :- .build/release/calctl
-otool -l .build/release/calctl | grep -A4 -B2 '__info_plist'
+scripts/verify-release.sh
 ```
 
-## Permissions
+## Quick Start
 
-Check status without prompting:
+Check permission status without prompting:
 
 ```bash
 calctl auth status
 ```
 
-Request full Calendar access:
+Request full Calendar access. This may show a macOS privacy prompt:
 
 ```bash
 calctl auth request
 ```
 
-Apple's EventKit documentation says apps must obtain permission before accessing calendar data and should request only the access level needed. `calctl` requests full Calendar access because listing, showing, updating, and deleting events require reading existing calendar data. EventKit write-only access can create events, but it cannot read calendars or events — including events the app created — so it is insufficient for `list`, `show`, `update`, or `delete` workflows. `calctl` does **not** request Reminders access.
-
-On macOS 14+ / current SDKs, full calendar read/write access requires `NSCalendarsFullAccessUsageDescription` in `Info.plist`. `calctl` also includes the older `NSCalendarsUsageDescription` compatibility key for older macOS behavior.
-
-References:
-
-- Apple `EKEventStore`: https://developer.apple.com/documentation/eventkit/ekeventstore
-- Apple Event Store access: https://developer.apple.com/documentation/eventkit/accessing-the-event-store
-- Apple `NSCalendarsFullAccessUsageDescription`: https://developer.apple.com/documentation/BundleResources/Information-Property-List/NSCalendarsFullAccessUsageDescription
-- Apple `requestWriteOnlyAccessToEvents`: https://developer.apple.com/documentation/eventkit/ekeventstore/requestwriteonlyaccesstoevents(completion:)
-
-## Commands
-
-### List calendars
+List calendars and create a local alias:
 
 ```bash
 calctl calendars list
-calctl calendars list --writable-only
-```
-
-### Aliases
-
-Aliases are local only at `~/.calctl/config.json`; the directory is written with `0700` permissions and the config file with `0600` permissions.
-
-```bash
 calctl alias set work CALENDAR_ID
-calctl alias list
-calctl alias remove work
 ```
 
-### List events
-
-Timed date ranges must be ISO 8601 and must include an explicit timezone (`Z` or `±HH:MM`). This avoids silently interpreting ambiguous local times incorrectly.
+List events in a timezone-explicit range:
 
 ```bash
 calctl events list \
@@ -90,25 +57,7 @@ calctl events list \
   --to 2026-05-09T00:00:00-04:00
 ```
 
-Omit `--calendar` to search all calendars:
-
-```bash
-calctl events list \
-  --from 2026-05-08T00:00:00-04:00 \
-  --to 2026-05-09T00:00:00-04:00
-```
-
-Notes are omitted by default because they can contain sensitive information. Include them explicitly:
-
-```bash
-calctl events show EVENT_ID --include-notes
-```
-
-### Create events
-
-Writes require `--force`.
-
-Timed event:
+Writes require explicit confirmation by the caller before passing `--force`:
 
 ```bash
 calctl events create \
@@ -116,89 +65,44 @@ calctl events create \
   --title "Project review" \
   --start 2026-05-08T09:00:00-04:00 \
   --end 2026-05-08T10:00:00-04:00 \
-  --location "Office" \
-  --notes "Bring notes" \
-  --url https://example.com \
-  --alarm-minutes 15 \
   --force
 ```
 
-All-day event:
+## Documentation
 
-```bash
-calctl events create --calendar work --title "Court closed" --date 2026-05-08 --force
-```
+- [Command Reference](docs/command-reference.md)
+- [JSON Output](docs/json-output.md)
+- [Permissions and TCC](docs/permissions-tcc.md)
+- [Privacy and Security](docs/privacy-security.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Limitations](docs/limitations.md)
+- [Testing and Release Verification](docs/testing-release-verification.md)
 
-All-day dates are interpreted in the user's current macOS calendar/timezone.
-
-### Update events
-
-```bash
-calctl events update EVENT_ID \
-  --title "New title" \
-  --start 2026-05-08T10:00:00-04:00 \
-  --end 2026-05-08T11:00:00-04:00 \
-  --force
-```
-
-For recurring events, span defaults to this occurrence:
-
-```bash
-calctl events update EVENT_ID --location "Room B" --span this --force
-calctl events update EVENT_ID --location "Room B" --span future --force
-```
-
-`--clear-location` conflicts with `--location`; `--clear-notes` conflicts with `--notes`. The CLI rejects those combinations.
-
-### Delete events
-
-```bash
-calctl events show EVENT_ID
-calctl events delete EVENT_ID --span this --force
-```
-
-`delete` returns a snapshot of the deleted event without notes.
-
-## Safety model
+## Safety Model
 
 - Runtime is local EventKit only.
-- No network calls in the application source.
-- No Reminders permission request.
+- No network calls, telemetry, cloud APIs, or Reminders permission requests are used by the app source.
 - `auth status` does not prompt.
-- Full Calendar access is requested only by `auth request` or when a command actually needs EventKit access and status is `notDetermined`.
-- Writes (`create`, `update`, `delete`) require `--force`.
-- Notes are omitted from reads unless `--include-notes` is explicit.
-- Timed inputs require explicit timezone.
-- `end` must be after `start`.
-- Event URLs require a valid URL scheme.
-
-Agent integrations should add another confirmation layer before passing `--force`.
-
-## JSON behavior
-
-Successful command execution and command runtime validation failures print JSON. Swift ArgumentParser usage errors, such as missing required options, may print standard CLI help/error text before command execution begins.
+- `auth request` may prompt.
+- EventKit commands may prompt if Calendar status is `notDetermined`.
+- Full Calendar access is required for read/show/update/delete; write-only Calendar access is insufficient.
+- Notes are omitted unless `--include-notes` is explicit. Create/update/delete responses omit notes.
+- `create`, `update`, and `delete` require `--force`.
 
 ## Tests
 
-This repository uses a small self-contained test runner instead of XCTest because some Command Line Tools installations do not expose XCTest to SwiftPM CLI targets.
+This repository uses a small self-contained Swift test runner instead of XCTest because some Command Line Tools installations do not expose XCTest to SwiftPM CLI targets.
 
 ```bash
 swift run calctl-tests
 swift build --product calctl
+scripts/test-cli-json.sh
 scripts/build-release.sh
+scripts/verify-release.sh
 ```
 
-CI also checks that the release binary contains an embedded `Info.plist` and Calendar entitlement.
-
-## Limitations
-
-- Calendar events only; no Reminders.
-- No attendee/invite management.
-- No recurrence creation yet.
-- No calendar creation/deletion.
-- EventKit identifiers can change after sync or app relaunch in some Apple workflows. Prefer a fresh `list`/`show` before update/delete.
-- Write-only Calendar access is insufficient for this CLI because list/show/update/delete require read access.
+The opt-in EventKit E2E script is documented in [Testing and Release Verification](docs/testing-release-verification.md). Do not run it against real Calendar data unless you have created the disposable `CalCTL Test` calendar and explicitly opted in.
 
 ## License
 
-`calctl` is licensed under 0BSD, which permits use, copying, modification, and distribution for any purpose, with or without fee, and does not require preserving copyright notices, license text, or attribution. The software is provided without warranty or liability.
+`calctl` is licensed under 0BSD. See [LICENSE](LICENSE).
